@@ -1,42 +1,31 @@
 'use strict';
 
-import weather from '../pages/weatherForecastPage.html';
-document.getElementById('content').innerHTML += weather;
+let favoritesData = localStorage.getItem('favorites') || '[]';
+let favorites = JSON.parse(favoritesData);
 
-import hideAll from './hidePage';
-import debounce from './debounce';
-import { getHistory, addHistory } from './history';
-import { addFavorite, getFavorites, removeFavorite } from './favorites';
+// history from localStorage
+let historyData = localStorage.getItem('history') || '[]';
+let history = JSON.parse(historyData);
+// show history
+showHistory(history);
 
-let map;
-let lastCity;
-let points = [];
-
-export default function showWeatherPage(city) {
+bus.on('route:weather:enter', function(city) {
     hideAll();
     let weatherPageContent = document.getElementById('weatherPageContent');
     let footer = document.getElementById('footer');
     footer.style.display = 'block';
     weatherPageContent.style.display = 'block';
-
-    let firstStart = !map;
-
-    if (!map) {
-        map = new ymaps.Map('mapContent', {
-            // London coordinates
+    if (!myMap) {
+        myMap = new ymaps.Map('mapContent', {
             center: [51.50853, -0.12574],
             zoom: 9,
             controls: ['zoomControl', 'typeSelector', 'fullscreenControl']
         });
 
-        map.events.add(
+        myMap.events.add(
             'boundschange',
-            /* 600 - delay for getCenter, selected empirically
-            when the map is loading or moving from city to city, it 3 times receives coordinates, 
-            the delay gives the opportunity to take only the last coordinates, 
-            and so to reduce the number of weather forecast requests */
             debounce(() => {
-                weatherUpdate(map.getCenter());
+                bus.trigger('weather:update', myMap.getCenter());
             }, 600)
         );
 
@@ -51,47 +40,73 @@ export default function showWeatherPage(city) {
             }
         });
 
-        favoriteButton.events.add('click', clickFavoriteButton);
+        favoriteButton.events.add('click', () => {
+            // ask name of new favorite place
+            let name = prompt('Введите название места', lastCity);
+            if (name) {
+                name = name.trim();
+            }
+            if (!name) {
+                return;
+            }
 
-        map.controls.add(favoriteButton);
+            // get lat&lon of the map center
+            let lat_lon = myMap.getCenter();
+
+            // create and put the point on map
+            let createdPoint = createPoint(name, lat_lon);
+
+            // add favorite and store
+            let place = {
+                lat_lon: lat_lon,
+                name: name,
+                point: createdPoint
+            };
+            favorites.unshift(place);
+            storeFavorites();
+
+            //show favorites list
+            bus.trigger('favorites:updated');
+        });
+
+        myMap.controls.add(favoriteButton);
     }
 
     if (city) {
         getCityCoordinates(city);
-    } else if (firstStart) {
-        getUserCoordinates();
+    } else {
+        let myHeaders = new Headers();
+        myHeaders.append('Content-Type', 'application/json');
+        myHeaders.append('Accept', 'application/json');
+        let myInit = {
+            method: 'GET',
+            headers: myHeaders,
+            mode: 'cors',
+            cache: 'default'
+        };
+        fetch('https://ipinfo.io/?token=b06e0fc311d617', myInit)
+            .then(function(response) {
+                if (response.ok) {
+                    return response.json();
+                }
+                console.log('ip-api failure:', response);
+                throw new Error('ip-api failure');
+            })
+            .then(function(userinfo) {
+                let loc = userinfo.loc;
+                let lat_lon = loc.split(',');
+                bus.trigger('position:found', [+lat_lon[0], +lat_lon[1]]);
+            });
     }
 
-    getHistory().then(showHistory);
-
-    getFavorites().then((favorites) => {
-        for (let i = 0; i < favorites.length; i++) {
-            points.push(createPoint(favorites[i].name, favorites[i].lat_lon));
-        }
-        showFavorites(favorites);
-    })
-}
-
-function clickFavoriteButton() {
-    // ask name of new favorite place
-    let name = prompt('Введите название места', lastCity);
-    if (name) {
-        name = name.trim();
+    for (let i = 0; i < favorites.length; i++) {
+        favorites[i].point = createPoint(
+            favorites[i].name,
+            favorites[i].lat_lon
+        );
     }
-    if (!name) {
-        return;
-    }
-
-    // get lat&lon of the map center
-    let lat_lon = map.getCenter();
-
-    addFavorite({lat_lon, name}).then((favorites) => {
-        // create and put the point on map
-        let p = createPoint(name, lat_lon);
-        points.unshift(p);
-        showFavorites(favorites);
-    });
-}
+    bus.trigger('favorites:updated');
+});
 
 function getCityCoordinates(city) {
     return fetch(
@@ -111,41 +126,15 @@ function getCityCoordinates(city) {
             }
             var lat = cityCoordinates.results[0].geometry.location.lat;
             var lng = cityCoordinates.results[0].geometry.location.lng;
-            changeMapPosition([lat, lng]);
-            lastCity = city;
-            addHistory(city).then(showHistory);
+            bus.trigger('position:found', [lat, lng]);
+            bus.trigger('history:add', city);
         })
         .catch(function(err) {
             alert('Not found this place on the Earth! ' + err);
         });
 }
 
-function getUserCoordinates() {
-    let hdr = new Headers();
-    hdr.append('Content-Type', 'application/json');
-    hdr.append('Accept', 'application/json');
-    let params = {
-        method: 'GET',
-        headers: hdr,
-        mode: 'cors',
-        cache: 'default'
-    };
-    fetch('https://ipinfo.io/?token=b06e0fc311d617', params)
-        .then(function(response) {
-            if (response.ok) {
-                return response.json();
-            }
-            console.log('ip-api failure:', response);
-            throw new Error('ip-api failure');
-        })
-        .then(function(userinfo) {
-            let loc = userinfo.loc;
-            let lat_lon = loc.split(',');
-            changeMapPosition([+lat_lon[0], +lat_lon[1]]);
-        });
-}
-
-function weatherUpdate(lat_lon) {
+bus.on('weather:update', lat_lon => {
     document.getElementById('weather-target').innerHTML =
         '<img src="./icons/load.gif" width="300"></img>';
     if (document.getElementById('fetch').checked) {
@@ -195,7 +184,7 @@ function weatherUpdate(lat_lon) {
             }
         };
     }
-}
+});
 
 function showWheather(weather) {
     let w = weather.currently;
@@ -207,22 +196,30 @@ function showWheather(weather) {
         w.icon
     }" width="50" title="${w.icon}"></img>`;
     let press = `<div class ="w"> Pressure: ${w.pressure} hPa</div>`;
-    let hum = `<div class ="w"> Humidity: ${parseInt(w.humidity * 100)} %</div>`;
+    let hum = `<div class ="w"> Humidity: ${w.humidity * 100} %</div>`;
     let wind = `<div class ="w"> Wind speed: ${w.windSpeed} m/s</div>`;
     document.getElementById('weather-target').innerHTML =
         temp + sum + icon + press + hum + wind;
 }
 
-function changeMapPosition(lat_lon) {
-    map.panTo(lat_lon, {
+bus.on('position:found', lat_lon => {
+    myMap.panTo(lat_lon, {
         /* Опции перемещения:
                 разрешить уменьшать и затем увеличивать зум
                 карты при перемещении между точками */
         flying: true
     });
-}
+});
 
-function showFavorites(favorites) {
+bus.on('history:add', city => {
+    lastCity = city;
+    history.unshift(city);
+    history = history.slice(0, 5);
+    localStorage.setItem('history', JSON.stringify(history));
+    showHistory(history);
+});
+
+bus.on('favorites:updated', () => {
     document.getElementById('favorites-target').innerHTML = '';
     for (let i = 0; i < favorites.length; i++) {
         let div = document.createElement('div');
@@ -230,7 +227,7 @@ function showFavorites(favorites) {
         let a = document.createElement('a');
         a.href = '#';
         a.onclick = function() {
-            changeMapPosition(favorites[i].lat_lon);
+            bus.trigger('position:found', favorites[i].lat_lon);
             return false;
         };
         a.innerText = favorites[i].name;
@@ -238,16 +235,32 @@ function showFavorites(favorites) {
         x.innerHTML = '<img src="./icons/delete.png" alt="x" width="15"></img>';
         x.href = '#';
         x.onclick = function() {
-            if (!confirm('Are you sure?')) { return false };
-            map.geoObjects.remove(points[i]);
-            points.splice(i, 1);
-            removeFavorite(i).then(showFavorites);
+            let del = confirm('Are you sure?');
+            if (!del) {
+                return false;
+            }
+            myMap.geoObjects.remove(favorites[i].point);
+            favorites.splice(i, 1);
+            storeFavorites();
+            bus.trigger('favorites:updated');
             return false;
         };
         div.appendChild(a);
         div.appendChild(x);
         document.getElementById('favorites-target').appendChild(div);
     }
+});
+
+function storeFavorites() {
+    let copy = [];
+    for (let i = 0; i < favorites.length; i++) {
+        let copyItem = {
+            lat_lon: favorites[i].lat_lon,
+            name: favorites[i].name
+        };
+        copy.push(copyItem);
+    }
+    localStorage.setItem('favorites', JSON.stringify(copy));
 }
 
 function showHistory(history) {
@@ -265,7 +278,7 @@ function showHistory(history) {
 
 function createPoint(name, lat_lon) {
     // create point and put it on the map
-    let point = new ymaps.GeoObject(
+    let myGeoObject = new ymaps.GeoObject(
         {
             geometry: {
                 type: 'Point',
@@ -280,6 +293,6 @@ function createPoint(name, lat_lon) {
             draggable: false
         }
     );
-    map.geoObjects.add(point);
-    return point;
+    myMap.geoObjects.add(myGeoObject);
+    return myGeoObject;
 }
