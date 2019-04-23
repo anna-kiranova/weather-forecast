@@ -1,1 +1,1 @@
-https://anna-kiranova.github.io/weatherForecast/
+https://anna-kiranova.github.io/weather-forecast/
